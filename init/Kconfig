@@ -132,6 +132,12 @@ config THREAD_INFO_IN_TASK
 
 menu "General setup"
 
+config LKP_OPTION1
+    bool "Linux Kernel book test Kconfig"
+    default 0
+    help
+        LKP book test Kconfig.
+
 config BROKEN
 	bool
 

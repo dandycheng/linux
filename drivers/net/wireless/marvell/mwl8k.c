@@ -587,6 +587,7 @@ static int mwl8k_request_firmware(struct mwl8k_priv *priv, char *fw_image,
 }
 
 struct mwl8k_cmd_pkt {
+	/* New members MUST be added within the __struct_group() macro below. */
 	__struct_group(mwl8k_cmd_pkt_hdr, hdr, __packed,
 		__le16	code;
 		__le16	length;
@@ -596,6 +597,8 @@ struct mwl8k_cmd_pkt {
 	);
 	char payload[];
 } __packed;
+static_assert(offsetof(struct mwl8k_cmd_pkt, payload) == sizeof(struct mwl8k_cmd_pkt_hdr),
+	      "struct member likely outside of __struct_group()");
 
 /*
  * Firmware loading.
@@ -1224,6 +1227,10 @@ static int rxq_refill(struct ieee80211_hw *hw, int index, int limit)
 
 		addr = dma_map_single(&priv->pdev->dev, skb->data,
 				      MWL8K_RX_MAXSZ, DMA_FROM_DEVICE);
+		if (dma_mapping_error(&priv->pdev->dev, addr)) {
+			kfree_skb(skb);
+			break;
+		}
 
 		rxq->rxd_count++;
 		rx = rxq->tail++;
@@ -2211,7 +2218,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt_hdr *cmd
 	dma_addr_t dma_addr;
 	unsigned int dma_size;
 	int rc;
-	unsigned long timeout = 0;
+	unsigned long time_left = 0;
 	u8 buf[32];
 	u32 bitmap = 0;
 
@@ -2258,8 +2265,8 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt_hdr *cmd
 	iowrite32(MWL8K_H2A_INT_DUMMY,
 		regs + MWL8K_HIU_H2A_INTERRUPT_EVENTS);
 
-	timeout = wait_for_completion_timeout(&cmd_wait,
-				msecs_to_jiffies(MWL8K_CMD_TIMEOUT_MS));
+	time_left = wait_for_completion_timeout(&cmd_wait,
+						msecs_to_jiffies(MWL8K_CMD_TIMEOUT_MS));
 
 	priv->hostcmd_wait = NULL;
 
@@ -2267,7 +2274,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt_hdr *cmd
 	dma_unmap_single(&priv->pdev->dev, dma_addr, dma_size,
 			 DMA_BIDIRECTIONAL);
 
-	if (!timeout) {
+	if (!time_left) {
 		wiphy_err(hw->wiphy, "Command %s timeout after %u ms\n",
 			  mwl8k_cmd_name(cmd->code, buf, sizeof(buf)),
 			  MWL8K_CMD_TIMEOUT_MS);
@@ -2275,7 +2282,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt_hdr *cmd
 	} else {
 		int ms;
 
-		ms = MWL8K_CMD_TIMEOUT_MS - jiffies_to_msecs(timeout);
+		ms = MWL8K_CMD_TIMEOUT_MS - jiffies_to_msecs(time_left);
 
 		rc = cmd->result ? -EINVAL : 0;
 		if (rc)
@@ -3366,7 +3373,8 @@ struct mwl8k_cmd_set_rts_threshold {
 } __packed;
 
 static int
-mwl8k_cmd_set_rts_threshold(struct ieee80211_hw *hw, int rts_thresh)
+mwl8k_cmd_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+			    int rts_thresh)
 {
 	struct mwl8k_cmd_set_rts_threshold *cmd;
 	int rc;
@@ -4768,7 +4776,7 @@ static int mwl8k_start(struct ieee80211_hw *hw)
 	return rc;
 }
 
-static void mwl8k_stop(struct ieee80211_hw *hw)
+static void mwl8k_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct mwl8k_priv *priv = hw->priv;
 	int i;
@@ -4952,7 +4960,7 @@ fail:
 	wiphy_err(hw->wiphy, "Firmware restart failed\n");
 }
 
-static int mwl8k_config(struct ieee80211_hw *hw, u32 changed)
+static int mwl8k_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct ieee80211_conf *conf = &hw->conf;
 	struct mwl8k_priv *priv = hw->priv;
@@ -5318,9 +5326,10 @@ static void mwl8k_configure_filter(struct ieee80211_hw *hw,
 	mwl8k_fw_unlock(hw);
 }
 
-static int mwl8k_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
+static int mwl8k_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+				   u32 value)
 {
-	return mwl8k_cmd_set_rts_threshold(hw, value);
+	return mwl8k_cmd_set_rts_threshold(hw, radio_idx, value);
 }
 
 static int mwl8k_sta_remove(struct ieee80211_hw *hw,
@@ -6023,7 +6032,7 @@ static int mwl8k_reload_firmware(struct ieee80211_hw *hw, char *fw_image)
 	struct mwl8k_priv *priv = hw->priv;
 	struct mwl8k_vif *vif, *tmp_vif;
 
-	mwl8k_stop(hw);
+	mwl8k_stop(hw, false);
 	mwl8k_rxq_deinit(hw, 0);
 
 	/*
@@ -6053,7 +6062,7 @@ static int mwl8k_reload_firmware(struct ieee80211_hw *hw, char *fw_image)
 	if (rc)
 		goto fail;
 
-	rc = mwl8k_config(hw, ~0);
+	rc = mwl8k_config(hw, -1, ~0);
 	if (rc)
 		goto fail;
 

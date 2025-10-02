@@ -32,7 +32,8 @@
 			{ NFS_INO_INVALID_BLOCKS, "INVALID_BLOCKS" }, \
 			{ NFS_INO_INVALID_XATTR, "INVALID_XATTR" }, \
 			{ NFS_INO_INVALID_NLINK, "INVALID_NLINK" }, \
-			{ NFS_INO_INVALID_MODE, "INVALID_MODE" })
+			{ NFS_INO_INVALID_MODE, "INVALID_MODE" }, \
+			{ NFS_INO_INVALID_BTIME, "INVALID_BTIME" })
 
 #define nfs_show_nfsi_flags(v) \
 	__print_flags(v, "|", \
@@ -56,6 +57,7 @@ DECLARE_EVENT_CLASS(nfs_inode_event,
 			__field(u32, fhandle)
 			__field(u64, fileid)
 			__field(u64, version)
+			__field(unsigned long, cache_validity)
 		),
 
 		TP_fast_assign(
@@ -64,14 +66,17 @@ DECLARE_EVENT_CLASS(nfs_inode_event,
 			__entry->fileid = nfsi->fileid;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
+			__entry->cache_validity = nfsi->cache_validity;
 		),
 
 		TP_printk(
-			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu ",
+			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu cache_validity=0x%lx (%s)",
 			MAJOR(__entry->dev), MINOR(__entry->dev),
 			(unsigned long long)__entry->fileid,
 			__entry->fhandle,
-			(unsigned long long)__entry->version
+			(unsigned long long)__entry->version,
+			__entry->cache_validity,
+			nfs_show_cache_validity(__entry->cache_validity)
 		)
 );
 
@@ -267,6 +272,7 @@ DECLARE_EVENT_CLASS(nfs_update_size_class,
 			TP_ARGS(inode, new_size))
 
 DEFINE_NFS_UPDATE_SIZE_EVENT(truncate);
+DEFINE_NFS_UPDATE_SIZE_EVENT(truncate_folio);
 DEFINE_NFS_UPDATE_SIZE_EVENT(wcc);
 DEFINE_NFS_UPDATE_SIZE_EVENT(update);
 DEFINE_NFS_UPDATE_SIZE_EVENT(grow);
@@ -939,10 +945,11 @@ TRACE_EVENT(nfs_sillyrename_unlink,
 DECLARE_EVENT_CLASS(nfs_folio_event,
 		TP_PROTO(
 			const struct inode *inode,
-			struct folio *folio
+			loff_t offset,
+			size_t count
 		),
 
-		TP_ARGS(inode, folio),
+		TP_ARGS(inode, offset, count),
 
 		TP_STRUCT__entry(
 			__field(dev_t, dev)
@@ -950,7 +957,7 @@ DECLARE_EVENT_CLASS(nfs_folio_event,
 			__field(u64, fileid)
 			__field(u64, version)
 			__field(loff_t, offset)
-			__field(u32, count)
+			__field(size_t, count)
 		),
 
 		TP_fast_assign(
@@ -960,13 +967,13 @@ DECLARE_EVENT_CLASS(nfs_folio_event,
 			__entry->fileid = nfsi->fileid;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
-			__entry->offset = folio_file_pos(folio);
-			__entry->count = nfs_folio_length(folio);
+			__entry->offset = offset,
+			__entry->count = count;
 		),
 
 		TP_printk(
 			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu "
-			"offset=%lld count=%u",
+			"offset=%lld count=%zu",
 			MAJOR(__entry->dev), MINOR(__entry->dev),
 			(unsigned long long)__entry->fileid,
 			__entry->fhandle, __entry->version,
@@ -978,18 +985,20 @@ DECLARE_EVENT_CLASS(nfs_folio_event,
 	DEFINE_EVENT(nfs_folio_event, name, \
 			TP_PROTO( \
 				const struct inode *inode, \
-				struct folio *folio \
+				loff_t offset, \
+				size_t count \
 			), \
-			TP_ARGS(inode, folio))
+			TP_ARGS(inode, offset, count))
 
 DECLARE_EVENT_CLASS(nfs_folio_event_done,
 		TP_PROTO(
 			const struct inode *inode,
-			struct folio *folio,
+			loff_t offset,
+			size_t count,
 			int ret
 		),
 
-		TP_ARGS(inode, folio, ret),
+		TP_ARGS(inode, offset, count, ret),
 
 		TP_STRUCT__entry(
 			__field(dev_t, dev)
@@ -998,7 +1007,7 @@ DECLARE_EVENT_CLASS(nfs_folio_event_done,
 			__field(u64, fileid)
 			__field(u64, version)
 			__field(loff_t, offset)
-			__field(u32, count)
+			__field(size_t, count)
 		),
 
 		TP_fast_assign(
@@ -1008,14 +1017,14 @@ DECLARE_EVENT_CLASS(nfs_folio_event_done,
 			__entry->fileid = nfsi->fileid;
 			__entry->fhandle = nfs_fhandle_hash(&nfsi->fh);
 			__entry->version = inode_peek_iversion_raw(inode);
-			__entry->offset = folio_file_pos(folio);
-			__entry->count = nfs_folio_length(folio);
+			__entry->offset = offset,
+			__entry->count = count,
 			__entry->ret = ret;
 		),
 
 		TP_printk(
 			"fileid=%02x:%02x:%llu fhandle=0x%08x version=%llu "
-			"offset=%lld count=%u ret=%d",
+			"offset=%lld count=%zu ret=%d",
 			MAJOR(__entry->dev), MINOR(__entry->dev),
 			(unsigned long long)__entry->fileid,
 			__entry->fhandle, __entry->version,
@@ -1027,10 +1036,11 @@ DECLARE_EVENT_CLASS(nfs_folio_event_done,
 	DEFINE_EVENT(nfs_folio_event_done, name, \
 			TP_PROTO( \
 				const struct inode *inode, \
-				struct folio *folio, \
+				loff_t offset, \
+				size_t count, \
 				int ret \
 			), \
-			TP_ARGS(inode, folio, ret))
+			TP_ARGS(inode, offset, count, ret))
 
 DEFINE_NFS_FOLIO_EVENT(nfs_aop_readpage);
 DEFINE_NFS_FOLIO_EVENT_DONE(nfs_aop_readpage_done);
@@ -1679,6 +1689,35 @@ TRACE_EVENT(nfs_mount_path,
 	),
 
 	TP_printk("path='%s'", __get_str(path))
+);
+
+TRACE_EVENT(nfs_local_open_fh,
+		TP_PROTO(
+			const struct nfs_fh *fh,
+			fmode_t fmode,
+			int error
+		),
+
+		TP_ARGS(fh, fmode, error),
+
+		TP_STRUCT__entry(
+			__field(int, error)
+			__field(u32, fhandle)
+			__field(unsigned int, fmode)
+		),
+
+		TP_fast_assign(
+			__entry->error = error;
+			__entry->fhandle = nfs_fhandle_hash(fh);
+			__entry->fmode = (__force unsigned int)fmode;
+		),
+
+		TP_printk(
+			"error=%d fhandle=0x%08x mode=%s",
+			__entry->error,
+			__entry->fhandle,
+			show_fs_fmode_flags(__entry->fmode)
+		)
 );
 
 DECLARE_EVENT_CLASS(nfs_xdr_event,

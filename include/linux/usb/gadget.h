@@ -229,18 +229,18 @@ struct usb_ep {
 
 	const char		*name;
 	const struct usb_ep_ops	*ops;
+	const struct usb_endpoint_descriptor	*desc;
+	const struct usb_ss_ep_comp_descriptor	*comp_desc;
 	struct list_head	ep_list;
 	struct usb_ep_caps	caps;
 	bool			claimed;
 	bool			enabled;
-	unsigned		maxpacket:16;
-	unsigned		maxpacket_limit:16;
-	unsigned		max_streams:16;
 	unsigned		mult:2;
 	unsigned		maxburst:5;
 	u8			address;
-	const struct usb_endpoint_descriptor	*desc;
-	const struct usb_ss_ep_comp_descriptor	*comp_desc;
+	u16			maxpacket;
+	u16			maxpacket_limit;
+	u16			max_streams;
 };
 
 /*-------------------------------------------------------------------------*/
@@ -859,10 +859,6 @@ container_of(str_item, struct gadget_string, item)
 /* write vector of descriptors into buffer */
 int usb_descriptor_fillbuf(void *, unsigned,
 		const struct usb_descriptor_header **);
-
-/* build config descriptor from single descriptor vector */
-int usb_gadget_config_buf(const struct usb_config_descriptor *config,
-	void *buf, unsigned buflen, const struct usb_descriptor_header **desc);
 
 /* copy a NULL-terminated vector of descriptors */
 struct usb_descriptor_header **usb_copy_descriptors(

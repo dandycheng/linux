@@ -27,7 +27,6 @@
 #include <linux/compat.h>
 #include <linux/kprobes.h>
 #include <linux/random.h>
-#include <linux/export.h>
 #include <linux/init_task.h>
 #include <linux/entry-common.h>
 #include <linux/io.h>
@@ -71,10 +70,10 @@ void flush_thread(void)
 
 void arch_setup_new_exec(void)
 {
-	if (S390_lowcore.current_pid != current->pid) {
-		S390_lowcore.current_pid = current->pid;
+	if (get_lowcore()->current_pid != current->pid) {
+		get_lowcore()->current_pid = current->pid;
 		if (test_facility(40))
-			lpp(&S390_lowcore.lpp);
+			lpp(&get_lowcore()->lpp);
 	}
 }
 
@@ -107,7 +106,7 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
-	unsigned long clone_flags = args->flags;
+	u64 clone_flags = args->flags;
 	unsigned long new_stackp = args->stack;
 	unsigned long tls = args->tls;
 	struct fake_frame

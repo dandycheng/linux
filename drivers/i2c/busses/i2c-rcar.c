@@ -130,6 +130,8 @@
 #define ID_P_PM_BLOCKED		BIT(31)
 #define ID_P_MASK		GENMASK(31, 27)
 
+#define ID_SLAVE_NACK		BIT(0)
+
 enum rcar_i2c_type {
 	I2C_RCAR_GEN1,
 	I2C_RCAR_GEN2,
@@ -166,6 +168,7 @@ struct rcar_i2c_priv {
 	int irq;
 
 	struct i2c_client *host_notify_client;
+	u8 slave_flags;
 };
 
 #define rcar_i2c_priv_to_dev(p)		((p)->adap.dev.parent)
@@ -191,8 +194,7 @@ static int rcar_i2c_get_scl(struct i2c_adapter *adap)
 	struct rcar_i2c_priv *priv = i2c_get_adapdata(adap);
 
 	return !!(rcar_i2c_read(priv, ICMCR) & FSCL);
-
-};
+}
 
 static void rcar_i2c_set_scl(struct i2c_adapter *adap, int val)
 {
@@ -204,7 +206,7 @@ static void rcar_i2c_set_scl(struct i2c_adapter *adap, int val)
 		priv->recovery_icmcr &= ~FSCL;
 
 	rcar_i2c_write(priv, ICMCR, priv->recovery_icmcr);
-};
+}
 
 static void rcar_i2c_set_sda(struct i2c_adapter *adap, int val)
 {
@@ -216,15 +218,14 @@ static void rcar_i2c_set_sda(struct i2c_adapter *adap, int val)
 		priv->recovery_icmcr &= ~FSDA;
 
 	rcar_i2c_write(priv, ICMCR, priv->recovery_icmcr);
-};
+}
 
 static int rcar_i2c_get_bus_free(struct i2c_adapter *adap)
 {
 	struct rcar_i2c_priv *priv = i2c_get_adapdata(adap);
 
 	return !(rcar_i2c_read(priv, ICMCR) & FSDA);
-
-};
+}
 
 static struct i2c_bus_recovery_info rcar_i2c_bri = {
 	.get_scl = rcar_i2c_get_scl,
@@ -233,6 +234,7 @@ static struct i2c_bus_recovery_info rcar_i2c_bri = {
 	.get_bus_free = rcar_i2c_get_bus_free,
 	.recover_bus = i2c_generic_scl_recovery,
 };
+
 static void rcar_i2c_init(struct rcar_i2c_priv *priv)
 {
 	/* reset master mode */
@@ -553,7 +555,7 @@ static void rcar_i2c_irq_send(struct rcar_i2c_priv *priv, u32 msr)
 	u32 irqs_to_clear = MDE;
 
 	/* FIXME: sometimes, unknown interrupt happened. Do nothing */
-	if (!(msr & MDE))
+	if (WARN(!(msr & MDE), "spurious irq"))
 		return;
 
 	if (msr & MAT)
@@ -656,6 +658,7 @@ static bool rcar_i2c_slave_irq(struct rcar_i2c_priv *priv)
 {
 	u32 ssr_raw, ssr_filtered;
 	u8 value;
+	int ret;
 
 	ssr_raw = rcar_i2c_read(priv, ICSSR) & 0xff;
 	ssr_filtered = ssr_raw & rcar_i2c_read(priv, ICSIER);
@@ -671,7 +674,10 @@ static bool rcar_i2c_slave_irq(struct rcar_i2c_priv *priv)
 			rcar_i2c_write(priv, ICRXTX, value);
 			rcar_i2c_write(priv, ICSIER, SDE | SSR | SAR);
 		} else {
-			i2c_slave_event(priv->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
+			ret = i2c_slave_event(priv->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
+			if (ret)
+				priv->slave_flags |= ID_SLAVE_NACK;
+
 			rcar_i2c_read(priv, ICRXTX);	/* dummy read */
 			rcar_i2c_write(priv, ICSIER, SDR | SSR | SAR);
 		}
@@ -684,18 +690,21 @@ static bool rcar_i2c_slave_irq(struct rcar_i2c_priv *priv)
 	if (ssr_filtered & SSR) {
 		i2c_slave_event(priv->slave, I2C_SLAVE_STOP, &value);
 		rcar_i2c_write(priv, ICSCR, SIE | SDBS); /* clear our NACK */
+		priv->slave_flags &= ~ID_SLAVE_NACK;
 		rcar_i2c_write(priv, ICSIER, SAR);
 		rcar_i2c_write(priv, ICSSR, ~SSR & 0xff);
 	}
 
 	/* master wants to write to us */
 	if (ssr_filtered & SDR) {
-		int ret;
-
 		value = rcar_i2c_read(priv, ICRXTX);
 		ret = i2c_slave_event(priv->slave, I2C_SLAVE_WRITE_RECEIVED, &value);
-		/* Send NACK in case of error */
-		rcar_i2c_write(priv, ICSCR, SIE | SDBS | (ret < 0 ? FNA : 0));
+		if (ret)
+			priv->slave_flags |= ID_SLAVE_NACK;
+
+		/* Send NACK in case of error, but it will come 1 byte late :( */
+		rcar_i2c_write(priv, ICSCR, SIE | SDBS |
+			       (priv->slave_flags & ID_SLAVE_NACK ? FNA : 0));
 		rcar_i2c_write(priv, ICSSR, ~SDR & 0xff);
 	}
 
@@ -1075,11 +1084,11 @@ static u32 rcar_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm rcar_i2c_algo = {
-	.master_xfer	= rcar_i2c_master_xfer,
-	.master_xfer_atomic = rcar_i2c_master_xfer_atomic,
-	.functionality	= rcar_i2c_func,
-	.reg_slave	= rcar_reg_slave,
-	.unreg_slave	= rcar_unreg_slave,
+	.xfer = rcar_i2c_master_xfer,
+	.xfer_atomic = rcar_i2c_master_xfer_atomic,
+	.functionality = rcar_i2c_func,
+	.reg_slave = rcar_reg_slave,
+	.unreg_slave = rcar_unreg_slave,
 };
 
 static const struct i2c_adapter_quirks rcar_i2c_quirks = {
@@ -1165,11 +1174,6 @@ static int rcar_i2c_probe(struct platform_device *pdev)
 	rcar_i2c_init(priv);
 	rcar_i2c_reset_slave(priv);
 
-	if (priv->devtype < I2C_RCAR_GEN3) {
-		irqflags |= IRQF_NO_THREAD;
-		irqhandler = rcar_i2c_gen2_irq;
-	}
-
 	/* Stay always active when multi-master to keep arbitration working */
 	if (of_property_read_bool(dev->of_node, "multi-master"))
 		priv->flags |= ID_P_PM_BLOCKED;
@@ -1179,8 +1183,11 @@ static int rcar_i2c_probe(struct platform_device *pdev)
 	if (of_property_read_bool(dev->of_node, "smbus"))
 		priv->flags |= ID_P_HOST_NOTIFY;
 
-	/* R-Car Gen3+ needs a reset before every transfer */
-	if (priv->devtype >= I2C_RCAR_GEN3) {
+	if (priv->devtype < I2C_RCAR_GEN3) {
+		irqflags |= IRQF_NO_THREAD;
+		irqhandler = rcar_i2c_gen2_irq;
+	} else {
+		/* R-Car Gen3+ needs a reset before every transfer */
 		priv->rstc = devm_reset_control_get_exclusive(&pdev->dev, NULL);
 		if (IS_ERR(priv->rstc)) {
 			ret = PTR_ERR(priv->rstc);
@@ -1274,7 +1281,7 @@ static struct platform_driver rcar_i2c_driver = {
 		.pm	= pm_sleep_ptr(&rcar_i2c_pm_ops),
 	},
 	.probe		= rcar_i2c_probe,
-	.remove_new	= rcar_i2c_remove,
+	.remove		= rcar_i2c_remove,
 };
 
 module_platform_driver(rcar_i2c_driver);

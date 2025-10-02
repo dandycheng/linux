@@ -429,7 +429,7 @@ static inline pte_t *get_ptep(struct mm_struct *mm, unsigned long addr)
 	return ptep;
 }
 
-static inline bool pte_needs_flush(pte_t pte)
+static inline bool pte_needs_cache_flush(pte_t pte)
 {
 	return (pte_val(pte) & (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_NO_CACHE))
 		== (_PAGE_PRESENT | _PAGE_ACCESSED);
@@ -611,11 +611,7 @@ void __init parisc_setup_cache_timing(void)
 		threshold/1024);
 
 set_tlb_threshold:
-	if (threshold > FLUSH_TLB_THRESHOLD)
-		parisc_tlb_flush_threshold = threshold;
-	else
-		parisc_tlb_flush_threshold = FLUSH_TLB_THRESHOLD;
-
+	parisc_tlb_flush_threshold = max(threshold, FLUSH_TLB_THRESHOLD);
 	printk(KERN_INFO "TLB flush threshold set to %lu KiB\n",
 		parisc_tlb_flush_threshold/1024);
 }
@@ -634,7 +630,7 @@ static void flush_cache_page_if_present(struct vm_area_struct *vma,
 	ptep = get_ptep(vma->vm_mm, vmaddr);
 	if (ptep) {
 		pte = ptep_get(ptep);
-		needs_flush = pte_needs_flush(pte);
+		needs_flush = pte_needs_cache_flush(pte);
 		pte_unmap(ptep);
 	}
 	if (needs_flush)
@@ -845,7 +841,7 @@ void flush_cache_vmap(unsigned long start, unsigned long end)
 	}
 
 	vm = find_vm_area((void *)start);
-	if (WARN_ON_ONCE(!vm)) {
+	if (!vm) {
 		flush_cache_all();
 		return;
 	}

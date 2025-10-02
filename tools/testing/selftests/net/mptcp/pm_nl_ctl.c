@@ -19,12 +19,6 @@
 
 #include "linux/mptcp.h"
 
-#ifndef MPTCP_PM_NAME
-#define MPTCP_PM_NAME		"mptcp_pm"
-#endif
-#ifndef MPTCP_PM_EVENTS
-#define MPTCP_PM_EVENTS		"mptcp_pm_events"
-#endif
 #ifndef IPPROTO_MPTCP
 #define IPPROTO_MPTCP 262
 #endif
@@ -116,7 +110,7 @@ static int capture_events(int fd, int event_group)
 
 	if (setsockopt(fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
 		       &event_group, sizeof(event_group)) < 0)
-		error(1, errno, "could not join the " MPTCP_PM_EVENTS " mcast group");
+		error(1, errno, "could not join the " MPTCP_PM_EV_GRP_NAME " mcast group");
 
 	do {
 		FD_ZERO(&rfds);
@@ -194,6 +188,13 @@ static int capture_events(int fd, int event_group)
 					fprintf(stderr, ",error:%u", *(__u8 *)RTA_DATA(attrs));
 				else if (attrs->rta_type == MPTCP_ATTR_SERVER_SIDE)
 					fprintf(stderr, ",server_side:%u", *(__u8 *)RTA_DATA(attrs));
+				else if (attrs->rta_type == MPTCP_ATTR_FLAGS) {
+					__u16 flags = *(__u16 *)RTA_DATA(attrs);
+
+					/* only print when present, easier */
+					if (flags & MPTCP_PM_EV_FLAG_DENY_JOIN_ID0)
+						fprintf(stderr, ",deny_join_id0:1");
+				}
 
 				attrs = RTA_NEXT(attrs, msg_len);
 			}
@@ -288,7 +289,7 @@ static int genl_parse_getfamily(struct nlmsghdr *nlh, int *pm_family,
 					if (grp->rta_type == CTRL_ATTR_MCAST_GRP_ID)
 						*events_mcast_grp = *(__u32 *)RTA_DATA(grp);
 					else if (grp->rta_type == CTRL_ATTR_MCAST_GRP_NAME &&
-						 !strcmp(RTA_DATA(grp), MPTCP_PM_EVENTS))
+						 !strcmp(RTA_DATA(grp), MPTCP_PM_EV_GRP_NAME))
 						got_events_grp = 1;
 
 					grp = RTA_NEXT(grp, grp_len);

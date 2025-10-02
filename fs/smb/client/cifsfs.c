@@ -70,15 +70,14 @@ bool require_gcm_256; /* false by default */
 bool enable_negotiate_signing; /* false by default */
 unsigned int global_secflags = CIFSSEC_DEF;
 /* unsigned int ntlmv2_support = 0; */
-unsigned int sign_CIFS_PDUs = 1;
 
 /*
  * Global transaction id (XID) information
  */
-unsigned int GlobalCurrentXid;	/* protected by GlobalMid_Sem */
-unsigned int GlobalTotalActiveXid; /* prot by GlobalMid_Sem */
-unsigned int GlobalMaxActiveXid;	/* prot by GlobalMid_Sem */
-spinlock_t GlobalMid_Lock; /* protects above & list operations on midQ entries */
+unsigned int GlobalCurrentXid;	/* protected by GlobalMid_Lock */
+unsigned int GlobalTotalActiveXid; /* prot by GlobalMid_Lock */
+unsigned int GlobalMaxActiveXid;	/* prot by GlobalMid_Lock */
+DEFINE_SPINLOCK(GlobalMid_Lock); /* protects above & list operations on midQ entries */
 
 /*
  *  Global counters, updated atomically
@@ -98,7 +97,7 @@ atomic_t total_buf_alloc_count;
 atomic_t total_small_buf_alloc_count;
 #endif/* STATS2 */
 struct list_head	cifs_tcp_ses_list;
-spinlock_t		cifs_tcp_ses_lock;
+DEFINE_SPINLOCK(cifs_tcp_ses_lock);
 static const struct super_operations cifs_super_ops;
 unsigned int CIFSMaxBufSize = CIFS_MAX_MSGSIZE;
 module_param(CIFSMaxBufSize, uint, 0444);
@@ -157,11 +156,12 @@ struct workqueue_struct	*fileinfo_put_wq;
 struct workqueue_struct	*cifsoplockd_wq;
 struct workqueue_struct	*deferredclose_wq;
 struct workqueue_struct	*serverclose_wq;
+struct workqueue_struct	*cfid_put_wq;
 __u32 cifs_lock_secret;
 
 /*
  * Bumps refcount for cifs super block.
- * Note that it should be only called if a referece to VFS super block is
+ * Note that it should be only called if a reference to VFS super block is
  * already held, e.g. in open-type syscalls context. Otherwise it can race with
  * atomic_dec_and_test in deactivate_locked_super.
  */
@@ -260,9 +260,9 @@ cifs_read_super(struct super_block *sb)
 	}
 
 	if (tcon->nocase)
-		sb->s_d_op = &cifs_ci_dentry_ops;
+		set_default_d_op(sb, &cifs_ci_dentry_ops);
 	else
-		sb->s_d_op = &cifs_dentry_ops;
+		set_default_d_op(sb, &cifs_dentry_ops);
 
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root) {
@@ -289,7 +289,7 @@ static void cifs_kill_sb(struct super_block *sb)
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
 
 	/*
-	 * We ned to release all dentries for the cached directories
+	 * We need to release all dentries for the cached directories
 	 * before we kill the sb.
 	 */
 	if (cifs_sb->root) {
@@ -313,8 +313,17 @@ cifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct TCP_Server_Info *server = tcon->ses->server;
 	unsigned int xid;
 	int rc = 0;
+	const char *full_path;
+	void *page;
 
 	xid = get_xid();
+	page = alloc_dentry_path();
+
+	full_path = build_path_from_dentry(dentry, page);
+	if (IS_ERR(full_path)) {
+		rc = PTR_ERR(full_path);
+		goto statfs_out;
+	}
 
 	if (le32_to_cpu(tcon->fsAttrInfo.MaxPathNameComponentLength) > 0)
 		buf->f_namelen =
@@ -330,8 +339,10 @@ cifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_ffree = 0;	/* unlimited */
 
 	if (server->ops->queryfs)
-		rc = server->ops->queryfs(xid, tcon, cifs_sb, buf);
+		rc = server->ops->queryfs(xid, tcon, full_path, cifs_sb, buf);
 
+statfs_out:
+	free_dentry_path(page);
 	free_xid(xid);
 	return rc;
 }
@@ -386,7 +397,7 @@ cifs_alloc_inode(struct super_block *sb)
 	cifs_inode = alloc_inode_sb(sb, cifs_inode_cachep, GFP_KERNEL);
 	if (!cifs_inode)
 		return NULL;
-	cifs_inode->cifsAttrs = 0x20;	/* default */
+	cifs_inode->cifsAttrs = ATTR_ARCHIVE;	/* default */
 	cifs_inode->time = 0;
 	/*
 	 * Until the file is open and we have gotten oplock info back from the
@@ -535,6 +546,30 @@ static int cifs_show_devname(struct seq_file *m, struct dentry *root)
 	return 0;
 }
 
+static void
+cifs_show_upcall_target(struct seq_file *s, struct cifs_sb_info *cifs_sb)
+{
+	if (cifs_sb->ctx->upcall_target == UPTARGET_UNSPECIFIED) {
+		seq_puts(s, ",upcall_target=app");
+		return;
+	}
+
+	seq_puts(s, ",upcall_target=");
+
+	switch (cifs_sb->ctx->upcall_target) {
+	case UPTARGET_APP:
+		seq_puts(s, "app");
+		break;
+	case UPTARGET_MOUNT:
+		seq_puts(s, "mount");
+		break;
+	default:
+		/* shouldn't ever happen */
+		seq_puts(s, "unknown");
+		break;
+	}
+}
+
 /*
  * cifs_show_options() is for displaying mount options in /proc/mounts.
  * Not all settable options are displayed but most of the important
@@ -551,6 +586,7 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 	seq_show_option(s, "vers", tcon->ses->server->vals->version_string);
 	cifs_show_security(s, tcon->ses);
 	cifs_show_cache_flavor(s, cifs_sb);
+	cifs_show_upcall_target(s, cifs_sb);
 
 	if (tcon->no_lease)
 		seq_puts(s, ",nolease");
@@ -600,6 +636,10 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 					   cifs_sb->ctx->dir_mode);
 	if (cifs_sb->ctx->iocharset)
 		seq_printf(s, ",iocharset=%s", cifs_sb->ctx->iocharset);
+	if (tcon->ses->unicode == 0)
+		seq_puts(s, ",nounicode");
+	else if (tcon->ses->unicode == 1)
+		seq_puts(s, ",unicode");
 	if (tcon->seal)
 		seq_puts(s, ",seal");
 	else if (tcon->ses->server->ignore_signature)
@@ -678,6 +718,12 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 					    cifs_sb->ctx->backupgid));
 	seq_show_option(s, "reparse",
 			cifs_reparse_type_str(cifs_sb->ctx->reparse_type));
+	if (cifs_sb->ctx->nonativesocket)
+		seq_puts(s, ",nonativesocket");
+	else
+		seq_puts(s, ",nativesocket");
+	seq_show_option(s, "symlink",
+			cifs_symlink_type_str(cifs_symlink_type(cifs_sb)));
 
 	seq_printf(s, ",rsize=%u", cifs_sb->ctx->rsize);
 	seq_printf(s, ",wsize=%u", cifs_sb->ctx->wsize);
@@ -811,7 +857,7 @@ static int cifs_drop_inode(struct inode *inode)
 
 	/* no serverino => unconditional eviction */
 	return !(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) ||
-		generic_drop_inode(inode);
+		inode_generic_drop(inode);
 }
 
 static const struct super_operations cifs_super_ops = {
@@ -882,7 +928,8 @@ cifs_get_root(struct smb3_fs_context *ctx, struct super_block *sb)
 		while (*s && *s != sep)
 			s++;
 
-		child = lookup_positive_unlocked(p, dentry, s - p);
+		child = lookup_noperm_positive_unlocked(&QSTR_LEN(p, s - p),
+							dentry);
 		dput(dentry);
 		dentry = child;
 	} while (!IS_ERR(dentry));
@@ -1311,6 +1358,20 @@ static loff_t cifs_remap_file_range(struct file *src_file, loff_t off,
 			truncate_setsize(target_inode, new_size);
 			fscache_resize_cookie(cifs_inode_cookie(target_inode),
 					      new_size);
+		} else if (rc == -EOPNOTSUPP) {
+			/*
+			 * copy_file_range syscall man page indicates EINVAL
+			 * is returned e.g when "fd_in and fd_out refer to the
+			 * same file and the source and target ranges overlap."
+			 * Test generic/157 was what showed these cases where
+			 * we need to remap EOPNOTSUPP to EINVAL
+			 */
+			if (off >= src_inode->i_size) {
+				rc = -EINVAL;
+			} else if (src_inode == target_inode) {
+				if (off + len > destoff)
+					rc = -EINVAL;
+			}
 		}
 		if (rc == 0 && new_size > target_cifsi->netfs.zero_point)
 			target_cifsi->netfs.zero_point = new_size;
@@ -1341,7 +1402,6 @@ ssize_t cifs_file_copychunk_range(unsigned int xid,
 	struct cifsFileInfo *smb_file_target;
 	struct cifs_tcon *src_tcon;
 	struct cifs_tcon *target_tcon;
-	unsigned long long destend, fstart, fend;
 	ssize_t rc;
 
 	cifs_dbg(FYI, "copychunk range\n");
@@ -1359,7 +1419,7 @@ ssize_t cifs_file_copychunk_range(unsigned int xid,
 	target_tcon = tlink_tcon(smb_file_target->tlink);
 
 	if (src_tcon->ses != target_tcon->ses) {
-		cifs_dbg(VFS, "source and target of copy not on same server\n");
+		cifs_dbg(FYI, "source and target of copy not on same server\n");
 		goto out;
 	}
 
@@ -1391,25 +1451,13 @@ ssize_t cifs_file_copychunk_range(unsigned int xid,
 			goto unlock;
 	}
 
-	destend = destoff + len - 1;
-
-	/* Flush the folios at either end of the destination range to prevent
-	 * accidental loss of dirty data outside of the range.
+	/* Flush and invalidate all the folios in the destination region.  If
+	 * the copy was successful, then some of the flush is extra overhead,
+	 * but we need to allow for the copy failing in some way (eg. ENOSPC).
 	 */
-	fstart = destoff;
-	fend = destend;
-
-	rc = cifs_flush_folio(target_inode, destoff, &fstart, &fend, true);
+	rc = filemap_invalidate_inode(target_inode, true, destoff, destoff + len - 1);
 	if (rc)
 		goto unlock;
-	rc = cifs_flush_folio(target_inode, destend, &fstart, &fend, false);
-	if (rc)
-		goto unlock;
-	if (fend > target_cifsi->netfs.zero_point)
-		target_cifsi->netfs.zero_point = fend + 1;
-
-	/* Discard all the folios that overlap the destination region. */
-	truncate_inode_pages_range(&target_inode->i_data, fstart, fend);
 
 	fscache_invalidate(cifs_inode_cookie(target_inode), NULL,
 			   i_size_read(target_inode), 0);
@@ -1491,7 +1539,7 @@ const struct file_operations cifs_file_ops = {
 	.flock = cifs_flock,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
-	.mmap  = cifs_file_mmap,
+	.mmap_prepare = cifs_file_mmap_prepare,
 	.splice_read = filemap_splice_read,
 	.splice_write = iter_file_splice_write,
 	.llseek = cifs_llseek,
@@ -1511,7 +1559,7 @@ const struct file_operations cifs_file_strict_ops = {
 	.flock = cifs_flock,
 	.fsync = cifs_strict_fsync,
 	.flush = cifs_flush,
-	.mmap = cifs_file_strict_mmap,
+	.mmap_prepare = cifs_file_strict_mmap_prepare,
 	.splice_read = filemap_splice_read,
 	.splice_write = iter_file_splice_write,
 	.llseek = cifs_llseek,
@@ -1531,7 +1579,7 @@ const struct file_operations cifs_file_direct_ops = {
 	.flock = cifs_flock,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
-	.mmap = cifs_file_mmap,
+	.mmap_prepare = cifs_file_mmap_prepare,
 	.splice_read = copy_splice_read,
 	.splice_write = iter_file_splice_write,
 	.unlocked_ioctl  = cifs_ioctl,
@@ -1549,7 +1597,7 @@ const struct file_operations cifs_file_nobrl_ops = {
 	.release = cifs_close,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
-	.mmap  = cifs_file_mmap,
+	.mmap_prepare = cifs_file_mmap_prepare,
 	.splice_read = filemap_splice_read,
 	.splice_write = iter_file_splice_write,
 	.llseek = cifs_llseek,
@@ -1567,7 +1615,7 @@ const struct file_operations cifs_file_strict_nobrl_ops = {
 	.release = cifs_close,
 	.fsync = cifs_strict_fsync,
 	.flush = cifs_flush,
-	.mmap = cifs_file_strict_mmap,
+	.mmap_prepare = cifs_file_strict_mmap_prepare,
 	.splice_read = filemap_splice_read,
 	.splice_write = iter_file_splice_write,
 	.llseek = cifs_llseek,
@@ -1585,7 +1633,7 @@ const struct file_operations cifs_file_direct_nobrl_ops = {
 	.release = cifs_close,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
-	.mmap = cifs_file_mmap,
+	.mmap_prepare = cifs_file_mmap_prepare,
 	.splice_read = copy_splice_read,
 	.splice_write = iter_file_splice_write,
 	.unlocked_ioctl  = cifs_ioctl,
@@ -1782,7 +1830,7 @@ static int cifs_init_netfs(void)
 nomem_subreqpool:
 	kmem_cache_destroy(cifs_io_subrequest_cachep);
 nomem_subreq:
-	mempool_destroy(&cifs_io_request_pool);
+	mempool_exit(&cifs_io_request_pool);
 nomem_reqpool:
 	kmem_cache_destroy(cifs_io_request_cachep);
 nomem_req:
@@ -1829,8 +1877,6 @@ init_cifs(void)
 	GlobalCurrentXid = 0;
 	GlobalTotalActiveXid = 0;
 	GlobalMaxActiveXid = 0;
-	spin_lock_init(&cifs_tcp_ses_lock);
-	spin_lock_init(&GlobalMid_Lock);
 
 	cifs_lock_secret = get_random_u32();
 
@@ -1849,7 +1895,9 @@ init_cifs(void)
 		cifs_dbg(VFS, "dir_cache_timeout set to max of 65000 seconds\n");
 	}
 
-	cifsiod_wq = alloc_workqueue("cifsiod", WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
+	cifsiod_wq = alloc_workqueue("cifsiod",
+				     WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+				     0);
 	if (!cifsiod_wq) {
 		rc = -ENOMEM;
 		goto out_clean_proc;
@@ -1877,29 +1925,40 @@ init_cifs(void)
 	}
 
 	cifsoplockd_wq = alloc_workqueue("cifsoplockd",
-					 WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
+					 WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+					 0);
 	if (!cifsoplockd_wq) {
 		rc = -ENOMEM;
 		goto out_destroy_fileinfo_put_wq;
 	}
 
 	deferredclose_wq = alloc_workqueue("deferredclose",
-					   WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
+					   WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+					   0);
 	if (!deferredclose_wq) {
 		rc = -ENOMEM;
 		goto out_destroy_cifsoplockd_wq;
 	}
 
 	serverclose_wq = alloc_workqueue("serverclose",
-					   WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
+					   WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+					   0);
 	if (!serverclose_wq) {
+		rc = -ENOMEM;
+		goto out_destroy_deferredclose_wq;
+	}
+
+	cfid_put_wq = alloc_workqueue("cfid_put_wq",
+				      WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_PERCPU,
+				      0);
+	if (!cfid_put_wq) {
 		rc = -ENOMEM;
 		goto out_destroy_serverclose_wq;
 	}
 
 	rc = cifs_init_inodecache();
 	if (rc)
-		goto out_destroy_deferredclose_wq;
+		goto out_destroy_cfid_put_wq;
 
 	rc = cifs_init_netfs();
 	if (rc)
@@ -1967,6 +2026,10 @@ out_destroy_netfs:
 	cifs_destroy_netfs();
 out_destroy_inodecache:
 	cifs_destroy_inodecache();
+out_destroy_cfid_put_wq:
+	destroy_workqueue(cfid_put_wq);
+out_destroy_serverclose_wq:
+	destroy_workqueue(serverclose_wq);
 out_destroy_deferredclose_wq:
 	destroy_workqueue(deferredclose_wq);
 out_destroy_cifsoplockd_wq:
@@ -1977,8 +2040,6 @@ out_destroy_decrypt_wq:
 	destroy_workqueue(decrypt_wq);
 out_destroy_cifsiod_wq:
 	destroy_workqueue(cifsiod_wq);
-out_destroy_serverclose_wq:
-	destroy_workqueue(serverclose_wq);
 out_clean_proc:
 	cifs_proc_clean();
 	return rc;
@@ -2010,6 +2071,7 @@ exit_cifs(void)
 	destroy_workqueue(decrypt_wq);
 	destroy_workqueue(fileinfo_put_wq);
 	destroy_workqueue(serverclose_wq);
+	destroy_workqueue(cfid_put_wq);
 	destroy_workqueue(cifsiod_wq);
 	cifs_proc_clean();
 }

@@ -57,11 +57,6 @@ struct vfio_pci_vf_token {
 	int			users;
 };
 
-struct vfio_pci_mmap_vma {
-	struct vm_area_struct	*vma;
-	struct list_head	vma_next;
-};
-
 static inline bool vfio_vga_disabled(void)
 {
 #ifdef CONFIG_VFIO_PCI_VGA
@@ -120,7 +115,7 @@ static void vfio_pci_probe_mmaps(struct vfio_pci_core_device *vdev)
 
 		res = &vdev->pdev->resource[bar];
 
-		if (!IS_ENABLED(CONFIG_VFIO_PCI_MMAP))
+		if (vdev->pdev->non_mappable_bars)
 			goto no_mmap;
 
 		if (!(res->flags & IORESOURCE_MEM))
@@ -731,15 +726,7 @@ EXPORT_SYMBOL_GPL(vfio_pci_core_finish_enable);
 static int vfio_pci_get_irq_count(struct vfio_pci_core_device *vdev, int irq_type)
 {
 	if (irq_type == VFIO_PCI_INTX_IRQ_INDEX) {
-		u8 pin;
-
-		if (!IS_ENABLED(CONFIG_VFIO_PCI_INTX) ||
-		    vdev->nointx || vdev->pdev->is_virtfn)
-			return 0;
-
-		pci_read_config_byte(vdev->pdev, PCI_INTERRUPT_PIN, &pin);
-
-		return pin ? 1 : 0;
+		return vdev->vconfig[PCI_INTERRUPT_PIN] ? 1 : 0;
 	} else if (irq_type == VFIO_PCI_MSI_IRQ_INDEX) {
 		u8 pos;
 		u16 flags;
@@ -1058,31 +1045,27 @@ static int vfio_pci_ioctl_get_region_info(struct vfio_pci_core_device *vdev,
 
 		info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
 		info.flags = 0;
+		info.size = 0;
 
-		/* Report the BAR size, not the ROM size */
-		info.size = pci_resource_len(pdev, info.index);
-		if (!info.size) {
-			/* Shadow ROMs appear as PCI option ROMs */
-			if (pdev->resource[PCI_ROM_RESOURCE].flags &
-			    IORESOURCE_ROM_SHADOW)
-				info.size = 0x20000;
-			else
-				break;
-		}
-
-		/*
-		 * Is it really there?  Enable memory decode for implicit access
-		 * in pci_map_rom().
-		 */
-		cmd = vfio_pci_memory_lock_and_enable(vdev);
-		io = pci_map_rom(pdev, &size);
-		if (io) {
+		if (pci_resource_start(pdev, PCI_ROM_RESOURCE)) {
+			/*
+			 * Check ROM content is valid. Need to enable memory
+			 * decode for ROM access in pci_map_rom().
+			 */
+			cmd = vfio_pci_memory_lock_and_enable(vdev);
+			io = pci_map_rom(pdev, &size);
+			if (io) {
+				info.flags = VFIO_REGION_INFO_FLAG_READ;
+				/* Report the BAR size, not the ROM size. */
+				info.size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
+				pci_unmap_rom(pdev, io);
+			}
+			vfio_pci_memory_unlock_and_restore(vdev, cmd);
+		} else if (pdev->rom && pdev->romlen) {
 			info.flags = VFIO_REGION_INFO_FLAG_READ;
-			pci_unmap_rom(pdev, io);
-		} else {
-			info.size = 0;
+			/* Report BAR size as power of two. */
+			info.size = roundup_pow_of_two(pdev->romlen);
 		}
-		vfio_pci_memory_unlock_and_restore(vdev, cmd);
 
 		break;
 	}
@@ -1328,7 +1311,7 @@ out:
 
 static int
 vfio_pci_ioctl_pci_hot_reset_groups(struct vfio_pci_core_device *vdev,
-				    int array_count, bool slot,
+				    u32 array_count, bool slot,
 				    struct vfio_pci_hot_reset __user *arg)
 {
 	int32_t *group_fds;
@@ -1657,45 +1640,69 @@ static unsigned long vma_to_pfn(struct vm_area_struct *vma)
 	return (pci_resource_start(vdev->pdev, index) >> PAGE_SHIFT) + pgoff;
 }
 
-static vm_fault_t vfio_pci_mmap_fault(struct vm_fault *vmf)
+static vm_fault_t vfio_pci_mmap_huge_fault(struct vm_fault *vmf,
+					   unsigned int order)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct vfio_pci_core_device *vdev = vma->vm_private_data;
-	unsigned long pfn, pgoff = vmf->pgoff - vma->vm_pgoff;
-	unsigned long addr = vma->vm_start;
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+	unsigned long pgoff = (addr - vma->vm_start) >> PAGE_SHIFT;
+	unsigned long pfn = vma_to_pfn(vma) + pgoff;
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 
-	pfn = vma_to_pfn(vma);
+	if (order && (addr < vma->vm_start ||
+		      addr + (PAGE_SIZE << order) > vma->vm_end ||
+		      pfn & ((1 << order) - 1))) {
+		ret = VM_FAULT_FALLBACK;
+		goto out;
+	}
 
 	down_read(&vdev->memory_lock);
 
 	if (vdev->pm_runtime_engaged || !__vfio_pci_memory_enabled(vdev))
 		goto out_unlock;
 
-	ret = vmf_insert_pfn(vma, vmf->address, pfn + pgoff);
-	if (ret & VM_FAULT_ERROR)
-		goto out_unlock;
-
-	/*
-	 * Pre-fault the remainder of the vma, abort further insertions and
-	 * supress error if fault is encountered during pre-fault.
-	 */
-	for (; addr < vma->vm_end; addr += PAGE_SIZE, pfn++) {
-		if (addr == vmf->address)
-			continue;
-
-		if (vmf_insert_pfn(vma, addr, pfn) & VM_FAULT_ERROR)
-			break;
+	switch (order) {
+	case 0:
+		ret = vmf_insert_pfn(vma, vmf->address, pfn);
+		break;
+#ifdef CONFIG_ARCH_SUPPORTS_PMD_PFNMAP
+	case PMD_ORDER:
+		ret = vmf_insert_pfn_pmd(vmf, pfn, false);
+		break;
+#endif
+#ifdef CONFIG_ARCH_SUPPORTS_PUD_PFNMAP
+	case PUD_ORDER:
+		ret = vmf_insert_pfn_pud(vmf, pfn, false);
+		break;
+#endif
+	default:
+		ret = VM_FAULT_FALLBACK;
 	}
 
 out_unlock:
 	up_read(&vdev->memory_lock);
+out:
+	dev_dbg_ratelimited(&vdev->pdev->dev,
+			   "%s(,order = %d) BAR %ld page offset 0x%lx: 0x%x\n",
+			    __func__, order,
+			    vma->vm_pgoff >>
+				(VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT),
+			    pgoff, (unsigned int)ret);
 
 	return ret;
 }
 
+static vm_fault_t vfio_pci_mmap_page_fault(struct vm_fault *vmf)
+{
+	return vfio_pci_mmap_huge_fault(vmf, 0);
+}
+
 static const struct vm_operations_struct vfio_pci_mmap_ops = {
-	.fault = vfio_pci_mmap_fault,
+	.fault = vfio_pci_mmap_page_fault,
+#ifdef CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP
+	.huge_fault = vfio_pci_mmap_huge_fault,
+#endif
 };
 
 int vfio_pci_core_mmap(struct vfio_device *core_vdev, struct vm_area_struct *vma)
@@ -1811,9 +1818,13 @@ void vfio_pci_core_request(struct vfio_device *core_vdev, unsigned int count)
 }
 EXPORT_SYMBOL_GPL(vfio_pci_core_request);
 
-static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
-				      bool vf_token, uuid_t *uuid)
+int vfio_pci_core_match_token_uuid(struct vfio_device *core_vdev,
+				   const uuid_t *uuid)
+
 {
+	struct vfio_pci_core_device *vdev =
+		container_of(core_vdev, struct vfio_pci_core_device, vdev);
+
 	/*
 	 * There's always some degree of trust or collaboration between SR-IOV
 	 * PF and VFs, even if just that the PF hosts the SR-IOV capability and
@@ -1844,7 +1855,7 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
 		bool match;
 
 		if (!pf_vdev) {
-			if (!vf_token)
+			if (!uuid)
 				return 0; /* PF is not vfio-pci, no VF token */
 
 			pci_info_ratelimited(vdev->pdev,
@@ -1852,7 +1863,7 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
 			return -EINVAL;
 		}
 
-		if (!vf_token) {
+		if (!uuid) {
 			pci_info_ratelimited(vdev->pdev,
 				"VF token required to access device\n");
 			return -EACCES;
@@ -1870,7 +1881,7 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
 	} else if (vdev->vf_token) {
 		mutex_lock(&vdev->vf_token->lock);
 		if (vdev->vf_token->users) {
-			if (!vf_token) {
+			if (!uuid) {
 				mutex_unlock(&vdev->vf_token->lock);
 				pci_info_ratelimited(vdev->pdev,
 					"VF token required to access device\n");
@@ -1883,12 +1894,12 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
 					"Incorrect VF token provided for device\n");
 				return -EACCES;
 			}
-		} else if (vf_token) {
+		} else if (uuid) {
 			uuid_copy(&vdev->vf_token->uuid, uuid);
 		}
 
 		mutex_unlock(&vdev->vf_token->lock);
-	} else if (vf_token) {
+	} else if (uuid) {
 		pci_info_ratelimited(vdev->pdev,
 			"VF token incorrectly provided, not a PF or VF\n");
 		return -EINVAL;
@@ -1896,6 +1907,7 @@ static int vfio_pci_validate_vf_token(struct vfio_pci_core_device *vdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(vfio_pci_core_match_token_uuid);
 
 #define VF_TOKEN_ARG "vf_token="
 
@@ -1942,7 +1954,8 @@ int vfio_pci_core_match(struct vfio_device *core_vdev, char *buf)
 		}
 	}
 
-	ret = vfio_pci_validate_vf_token(vdev, vf_token, &uuid);
+	ret = core_vdev->ops->match_token_uuid(core_vdev,
+					       vf_token ? &uuid : NULL);
 	if (ret)
 		return ret;
 
@@ -2139,7 +2152,7 @@ int vfio_pci_core_register_device(struct vfio_pci_core_device *vdev)
 		return -EBUSY;
 	}
 
-	if (pci_is_root_bus(pdev->bus)) {
+	if (pci_is_root_bus(pdev->bus) || pdev->is_virtfn) {
 		ret = vfio_assign_device_set(&vdev->vdev, vdev);
 	} else if (!pci_probe_reset_slot(pdev->slot)) {
 		ret = vfio_assign_device_set(&vdev->vdev, pdev->slot);

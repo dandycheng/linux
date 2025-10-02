@@ -8,8 +8,6 @@
 #include "bpf_misc.h"
 #include <../../../tools/include/linux/filter.h>
 
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
 int vals[] SEC(".data.vals") = {1, 2, 3, 4};
 
 __naked __noinline __used
@@ -107,7 +105,7 @@ __msg("mark_precise: frame0: regs=r0 stack= before 4: (27) r0 *= 4")
 __msg("mark_precise: frame0: regs=r0 stack= before 3: (57) r0 &= 3")
 __msg("mark_precise: frame0: regs=r0 stack= before 10: (95) exit")
 __msg("mark_precise: frame1: regs=r0 stack= before 9: (bf) r0 = (s8)r10")
-__msg("7: R0_w=scalar")
+__msg("7: R0=scalar")
 __naked int fp_precise_subprog_result(void)
 {
 	asm volatile (
@@ -143,7 +141,7 @@ __msg("mark_precise: frame1: regs=r0 stack= before 10: (bf) r0 = (s8)r1")
  * anyways, at which point we'll break precision chain
  */
 __msg("mark_precise: frame1: regs=r1 stack= before 9: (bf) r1 = r10")
-__msg("7: R0_w=scalar")
+__msg("7: R0=scalar")
 __naked int sneaky_fp_precise_subprog_result(void)
 {
 	asm volatile (
@@ -280,7 +278,7 @@ __msg("mark_precise: frame0: last_idx 14 first_idx 9")
 __msg("mark_precise: frame0: regs=r6 stack= before 13: (bf) r1 = r7")
 __msg("mark_precise: frame0: regs=r6 stack= before 12: (27) r6 *= 4")
 __msg("mark_precise: frame0: regs=r6 stack= before 11: (25) if r6 > 0x3 goto pc+4")
-__msg("mark_precise: frame0: regs=r6 stack= before 10: (bf) r6 = r0")
+__msg("mark_precise: frame0: regs=r0,r6 stack= before 10: (bf) r6 = r0")
 __msg("mark_precise: frame0: regs=r0 stack= before 9: (85) call bpf_loop")
 /* State entering callback body popped from states stack */
 __msg("from 9 to 17: frame1:")
@@ -683,7 +681,7 @@ __msg("mark_precise: frame0: last_idx 10 first_idx 7 subseq_idx -1")
 __msg("mark_precise: frame0: regs=r7 stack= before 9: (bf) r1 = r8")
 __msg("mark_precise: frame0: regs=r7 stack= before 8: (27) r7 *= 4")
 __msg("mark_precise: frame0: regs=r7 stack= before 7: (79) r7 = *(u64 *)(r10 -8)")
-__msg("mark_precise: frame0: parent state regs= stack=-8:  R0_w=2 R6_w=1 R8_rw=map_value(map=.data.vals,ks=4,vs=16) R10=fp0 fp-8_rw=P1")
+__msg("mark_precise: frame0: parent state regs= stack=-8:  R0=2 R6=1 R8=map_value(map=.data.vals,ks=4,vs=16) R10=fp0 fp-8=P1")
 __msg("mark_precise: frame0: last_idx 18 first_idx 0 subseq_idx 7")
 __msg("mark_precise: frame0: regs= stack=-8 before 18: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 17: (0f) r0 += r2")

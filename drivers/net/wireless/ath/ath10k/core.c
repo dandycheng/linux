@@ -4,8 +4,10 @@
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/of.h>
@@ -27,6 +29,7 @@
 #include "testmode.h"
 #include "wmi-ops.h"
 #include "coredump.h"
+#include "leds.h"
 
 unsigned int ath10k_debug_mask;
 EXPORT_SYMBOL(ath10k_debug_mask);
@@ -68,6 +71,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca988x hw2.0",
 		.patch_load_addr = QCA988X_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 1,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -108,6 +112,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca988x hw2.0 ubiquiti",
 		.patch_load_addr = QCA988X_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 0,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -149,6 +154,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9887 hw1.0",
 		.patch_load_addr = QCA9887_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 1,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_ALL,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
@@ -190,6 +196,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.2 sdio",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 19,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -226,6 +233,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6164 hw2.1",
 		.patch_load_addr = QCA6174_HW_2_1_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -266,6 +274,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw2.1",
 		.patch_load_addr = QCA6174_HW_2_1_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -306,6 +315,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.0",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -346,6 +356,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca6174 hw3.2",
 		.patch_load_addr = QCA6174_HW_3_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -390,6 +401,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca99x0 hw2.0",
 		.patch_load_addr = QCA99X0_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
 		.cck_rate_map_rev2 = true,
@@ -436,6 +448,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9984/qca9994 hw1.0",
 		.patch_load_addr = QCA9984_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
@@ -488,6 +501,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9888 hw2.0",
 		.patch_load_addr = QCA9888_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 17,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
@@ -538,6 +552,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.0",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -578,6 +593,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.1",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 6,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -620,6 +636,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9377 hw1.1 sdio",
 		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 19,
+		.led_pin = 0,
 		.otp_exe_param = 0,
 		.channel_counters_freq_hz = 88000,
 		.max_probe_resp_desc_thres = 0,
@@ -653,6 +670,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca4019 hw1.0",
 		.patch_load_addr = QCA4019_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.led_pin = 0,
 		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x0010000,
 		.continuous_frag_desc = true,
@@ -698,6 +716,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.dev_id = 0,
 		.bus = ATH10K_BUS_SNOC,
 		.name = "wcn3990 hw1.0",
+		.led_pin = 0,
 		.continuous_frag_desc = true,
 		.tx_chain_mask = 0x7,
 		.rx_chain_mask = 0x7,
@@ -1146,8 +1165,11 @@ int ath10k_core_check_dt(struct ath10k *ar)
 	if (!node)
 		return -ENOENT;
 
-	of_property_read_string(node, "qcom,ath10k-calibration-variant",
+	of_property_read_string(node, "qcom,calibration-variant",
 				&variant);
+	if (!variant)
+		of_property_read_string(node, "qcom,ath10k-calibration-variant",
+					&variant);
 	if (!variant)
 		return -ENODATA;
 
@@ -1180,7 +1202,7 @@ static int ath10k_download_fw(struct ath10k *ar)
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT,
-		   "boot uploading firmware image %pK len %d\n",
+		   "boot uploading firmware image %p len %d\n",
 		   data, data_len);
 
 	/* Check if device supports to download firmware via
@@ -1543,7 +1565,7 @@ static int ath10k_core_create_board_name(struct ath10k *ar, char *name,
 					 bool with_chip_id)
 {
 	/* strlen(',variant=') + strlen(ar->id.bdf_ext) */
-	char variant[9 + ATH10K_SMBIOS_BDF_EXT_STR_LENGTH] = { 0 };
+	char variant[9 + ATH10K_SMBIOS_BDF_EXT_STR_LENGTH] = {};
 
 	if (with_variant && ar->id.bdf_ext[0] != '\0')
 		scnprintf(variant, sizeof(variant), ",variant=%s",
@@ -1806,7 +1828,7 @@ static int ath10k_download_and_run_otp(struct ath10k *ar)
 
 	if (!ar->running_fw->fw_file.otp_data ||
 	    !ar->running_fw->fw_file.otp_len) {
-		ath10k_warn(ar, "Not running otp, calibration will be incorrect (otp-data %pK otp_len %zd)!\n",
+		ath10k_warn(ar, "Not running otp, calibration will be incorrect (otp-data %p otp_len %zd)!\n",
 			    ar->running_fw->fw_file.otp_data,
 			    ar->running_fw->fw_file.otp_len);
 		return 0;
@@ -2242,7 +2264,9 @@ static int ath10k_core_pre_cal_download(struct ath10k *ar)
 		   "boot did not find a pre calibration file, try DT next: %d\n",
 		   ret);
 
-	ret = ath10k_download_cal_dt(ar, "qcom,ath10k-pre-calibration-data");
+	ret = ath10k_download_cal_dt(ar, "qcom,pre-calibration-data");
+	if (ret == -ENOENT)
+		ret = ath10k_download_cal_dt(ar, "qcom,ath10k-pre-calibration-data");
 	if (ret) {
 		ath10k_dbg(ar, ATH10K_DBG_BOOT,
 			   "unable to load pre cal data from DT: %d\n", ret);
@@ -2320,7 +2344,9 @@ static int ath10k_download_cal_data(struct ath10k *ar)
 		   "boot did not find a calibration file, try DT next: %d\n",
 		   ret);
 
-	ret = ath10k_download_cal_dt(ar, "qcom,ath10k-calibration-data");
+	ret = ath10k_download_cal_dt(ar, "qcom,calibration-data");
+	if (ret == -ENOENT)
+		ret = ath10k_download_cal_dt(ar, "qcom,ath10k-calibration-data");
 	if (ret == 0) {
 		ar->cal_mode = ATH10K_CAL_MODE_DT;
 		goto done;
@@ -2467,12 +2493,50 @@ static int ath10k_init_hw_params(struct ath10k *ar)
 	return 0;
 }
 
+static bool ath10k_core_needs_recovery(struct ath10k *ar)
+{
+	long time_left;
+
+	/* Sometimes the recovery will fail and then the next all recovery fail,
+	 * so avoid infinite recovery.
+	 */
+	if (atomic_read(&ar->fail_cont_count) >= ATH10K_RECOVERY_MAX_FAIL_COUNT) {
+		ath10k_err(ar, "consecutive fail %d times, will shutdown driver!",
+			   atomic_read(&ar->fail_cont_count));
+		ar->state = ATH10K_STATE_WEDGED;
+		return false;
+	}
+
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "total recovery count: %d", ++ar->recovery_count);
+
+	if (atomic_read(&ar->pending_recovery)) {
+		/* Sometimes it happened another recovery work before the previous one
+		 * completed, then the second recovery work will destroy the previous
+		 * one, thus below is to avoid that.
+		 */
+		time_left = wait_for_completion_timeout(&ar->driver_recovery,
+							ATH10K_RECOVERY_TIMEOUT_HZ);
+		if (time_left) {
+			ath10k_warn(ar, "previous recovery succeeded, skip this!\n");
+			return false;
+		}
+
+		/* Record the continuous recovery fail count when recovery failed. */
+		atomic_inc(&ar->fail_cont_count);
+
+		/* Avoid having multiple recoveries at the same time. */
+		return false;
+	}
+
+	atomic_inc(&ar->pending_recovery);
+
+	return true;
+}
+
 void ath10k_core_start_recovery(struct ath10k *ar)
 {
-	if (test_and_set_bit(ATH10K_FLAG_RESTARTING, &ar->dev_flags)) {
-		ath10k_warn(ar, "already restarting\n");
+	if (!ath10k_core_needs_recovery(ar))
 		return;
-	}
 
 	queue_work(ar->workqueue, &ar->restart_work);
 }
@@ -2507,6 +2571,8 @@ static void ath10k_core_restart(struct work_struct *work)
 {
 	struct ath10k *ar = container_of(work, struct ath10k, restart_work);
 	int ret;
+
+	reinit_completion(&ar->driver_recovery);
 
 	set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 
@@ -2572,8 +2638,6 @@ static void ath10k_core_restart(struct work_struct *work)
 	if (ret)
 		ath10k_warn(ar, "failed to send firmware crash dump via devcoredump: %d",
 			    ret);
-
-	complete(&ar->driver_recovery);
 }
 
 static void ath10k_core_set_coverage_class_work(struct work_struct *work)
@@ -2582,7 +2646,7 @@ static void ath10k_core_set_coverage_class_work(struct work_struct *work)
 					 set_coverage_class_work);
 
 	if (ar->hw_params.hw_ops->set_coverage_class)
-		ar->hw_params.hw_ops->set_coverage_class(ar, -1);
+		ar->hw_params.hw_ops->set_coverage_class(ar, -1, -1);
 }
 
 static int ath10k_core_init_firmware_features(struct ath10k *ar)
@@ -3224,6 +3288,10 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 		goto err_hif_stop;
 	}
 
+	status = ath10k_leds_start(ar);
+	if (status)
+		goto err_hif_stop;
+
 	return 0;
 
 err_hif_stop:
@@ -3482,9 +3550,18 @@ static void ath10k_core_register_work(struct work_struct *work)
 		goto err_spectral_destroy;
 	}
 
+	status = ath10k_leds_register(ar);
+	if (status) {
+		ath10k_err(ar, "could not register leds: %d\n",
+			   status);
+		goto err_thermal_unregister;
+	}
+
 	set_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags);
 	return;
 
+err_thermal_unregister:
+	ath10k_thermal_unregister(ar);
 err_spectral_destroy:
 	ath10k_spectral_destroy(ar);
 err_debug_destroy:
@@ -3519,6 +3596,8 @@ void ath10k_core_unregister(struct ath10k *ar)
 
 	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
 		return;
+
+	ath10k_leds_unregister(ar);
 
 	ath10k_thermal_unregister(ar);
 	/* Stop spectral before unregistering from mac80211 to remove the

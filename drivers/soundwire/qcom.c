@@ -197,8 +197,7 @@ struct qcom_swrm_ctrl {
 	int num_dout_ports;
 	int cols_index;
 	int rows_index;
-	unsigned long dout_port_mask;
-	unsigned long din_port_mask;
+	unsigned long port_mask;
 	u32 intr_mask;
 	u8 rcmd_id;
 	u8 wcmd_id;
@@ -1073,7 +1072,7 @@ static const struct sdw_master_ops qcom_swrm_ops = {
 	.pre_bank_switch = qcom_swrm_pre_bank_switch,
 };
 
-static int qcom_swrm_compute_params(struct sdw_bus *bus)
+static int qcom_swrm_compute_params(struct sdw_bus *bus, struct sdw_stream_runtime *stream)
 {
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	struct sdw_master_runtime *m_rt;
@@ -1146,11 +1145,7 @@ static void qcom_swrm_stream_free_ports(struct qcom_swrm_ctrl *ctrl,
 	mutex_lock(&ctrl->port_lock);
 
 	list_for_each_entry(m_rt, &stream->master_list, stream_node) {
-		if (m_rt->direction == SDW_DATA_DIR_RX)
-			port_mask = &ctrl->dout_port_mask;
-		else
-			port_mask = &ctrl->din_port_mask;
-
+		port_mask = &ctrl->port_mask;
 		list_for_each_entry(p_rt, &m_rt->port_list, port_node)
 			clear_bit(p_rt->num, port_mask);
 	}
@@ -1178,7 +1173,7 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 	else
 		sconfig.direction = SDW_DATA_DIR_RX;
 
-	/* hw parameters wil be ignored as we only support PDM */
+	/* hw parameters will be ignored as we only support PDM */
 	sconfig.ch_count = 1;
 	sconfig.frame_rate = params_rate(params);
 	sconfig.type = stream->type;
@@ -1195,13 +1190,9 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 		if (ctrl->bus.id != m_rt->bus->id)
 			continue;
 
-		if (m_rt->direction == SDW_DATA_DIR_RX) {
-			maxport = ctrl->num_dout_ports;
-			port_mask = &ctrl->dout_port_mask;
-		} else {
-			maxport = ctrl->num_din_ports;
-			port_mask = &ctrl->din_port_mask;
-		}
+		port_mask = &ctrl->port_mask;
+		maxport = ctrl->num_dout_ports + ctrl->num_din_ports;
+
 
 		list_for_each_entry(s_rt, &m_rt->slave_rt_list, m_rt_node) {
 			slave = s_rt->slave;
@@ -1401,8 +1392,7 @@ static int qcom_swrm_get_port_config(struct qcom_swrm_ctrl *ctrl)
 		return -EINVAL;
 
 	/* Valid port numbers are from 1-14, so mask out port 0 explicitly */
-	set_bit(0, &ctrl->dout_port_mask);
-	set_bit(0, &ctrl->din_port_mask);
+	set_bit(0, &ctrl->port_mask);
 
 	ret = of_property_read_u8_array(np, "qcom,ports-offset1",
 					off1, nports);
@@ -1632,9 +1622,9 @@ static int qcom_swrm_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_master_add;
 
-	dev_info(dev, "Qualcomm Soundwire controller v%x.%x.%x Registered\n",
-		 (ctrl->version >> 24) & 0xff, (ctrl->version >> 16) & 0xff,
-		 ctrl->version & 0xffff);
+	dev_dbg(dev, "Qualcomm Soundwire controller v%x.%x.%x registered\n",
+		(ctrl->version >> 24) & 0xff, (ctrl->version >> 16) & 0xff,
+		ctrl->version & 0xffff);
 
 	pm_runtime_set_autosuspend_delay(dev, 3000);
 	pm_runtime_use_autosuspend(dev);
@@ -1789,7 +1779,7 @@ MODULE_DEVICE_TABLE(of, qcom_swrm_of_match);
 
 static struct platform_driver qcom_swrm_driver = {
 	.probe	= &qcom_swrm_probe,
-	.remove_new = qcom_swrm_remove,
+	.remove = qcom_swrm_remove,
 	.driver = {
 		.name	= "qcom-soundwire",
 		.of_match_table = qcom_swrm_of_match,

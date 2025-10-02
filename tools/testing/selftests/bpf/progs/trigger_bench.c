@@ -32,6 +32,13 @@ int bench_trigger_uprobe(void *ctx)
 	return 0;
 }
 
+SEC("?uprobe.multi")
+int bench_trigger_uprobe_multi(void *ctx)
+{
+	inc_counter();
+	return 0;
+}
+
 const volatile int batch_iters = 0;
 
 SEC("?raw_tp")
@@ -90,10 +97,22 @@ int bench_trigger_kprobe_multi(void *ctx)
 	return 0;
 }
 
+SEC("?kprobe.multi/bpf_get_numa_node_id")
+int bench_kprobe_multi_empty(void *ctx)
+{
+	return 0;
+}
+
 SEC("?kretprobe.multi/bpf_get_numa_node_id")
 int bench_trigger_kretprobe_multi(void *ctx)
 {
 	inc_counter();
+	return 0;
+}
+
+SEC("?kretprobe.multi/bpf_get_numa_node_id")
+int bench_kretprobe_multi_empty(void *ctx)
+{
 	return 0;
 }
 

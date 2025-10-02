@@ -49,6 +49,8 @@
 #include <linux/mlx4/device.h>
 #include <linux/mlx4/doorbell.h>
 
+#include <rdma/ib_verbs.h>
+
 #include "mlx4.h"
 #include "fw.h"
 #include "icm.h"
@@ -168,12 +170,6 @@ static int arr_argc = 2;
 module_param_array(port_type_array, int, &arr_argc, 0444);
 MODULE_PARM_DESC(port_type_array, "Array of port types: HW_DEFAULT (0) is default "
 				"1 for IB, 2 for Ethernet");
-
-struct mlx4_port_config {
-	struct list_head list;
-	enum mlx4_port_type port_type[MLX4_MAX_PORTS + 1];
-	struct pci_dev *pdev;
-};
 
 static atomic_t pf_loading = ATOMIC_INIT(0);
 
@@ -1252,14 +1248,6 @@ err_out:
 	return err ? err : count;
 }
 
-enum ibta_mtu {
-	IB_MTU_256  = 1,
-	IB_MTU_512  = 2,
-	IB_MTU_1024 = 3,
-	IB_MTU_2048 = 4,
-	IB_MTU_4096 = 5
-};
-
 static inline int int_to_ibta_mtu(int mtu)
 {
 	switch (mtu) {
@@ -1272,7 +1260,7 @@ static inline int int_to_ibta_mtu(int mtu)
 	}
 }
 
-static inline int ibta_mtu_to_int(enum ibta_mtu mtu)
+static inline int ibta_mtu_to_int(enum ib_mtu mtu)
 {
 	switch (mtu) {
 	case IB_MTU_256:  return  256;
